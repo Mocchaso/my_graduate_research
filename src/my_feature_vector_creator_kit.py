@@ -87,6 +87,9 @@ def make_svr_learning_feature(w_table, s_table, bow_txt_path):
         word_pn_scores = 0 # 1発話当たりの極性スコアの記録
         for word in wakati_usertalk.split():
             try:
+                if word in pn_table.keys(): # 1発話当たりの極性スコアを加算
+                    word_pn_scores += pn_table[word]
+                
                 if word in word2id.keys(): # 発話内の単語wordが、word_tableに登録されていたら
                     bow[word2id[word]] = 1
                     continue
