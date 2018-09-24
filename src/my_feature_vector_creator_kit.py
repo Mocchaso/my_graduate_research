@@ -41,13 +41,6 @@ def get_key_from_values(dic, val):
         return keys[0]
     return None
 
-def get_keys_from_values(dic, val):
-    """
-    引数valで指定した辞書の値からキーを抽出する
-    参考サイト：https://note.nkmk.me/python-dict-get-key-from-value/
-    """
-    return [k for k, v in dic.items() if v == val]
-
 def make_svr_learning_feature(w_table, s_table, bow_txt_path):
     """
     ユーザが入力した発話から特徴ベクトルを作成する
@@ -118,6 +111,7 @@ def make_svr_learning_feature(w_table, s_table, bow_txt_path):
             word_pn_ave = float(word_pn_scores) / (len(wakati_usertalk.split()) + 1)
             bow.append(word_pn_ave)
         bow_set.append(bow)
+        
     t2 = time.time()
     print("Finished making bag of words vector: about {} seconds.".format(t2 - t1))
     

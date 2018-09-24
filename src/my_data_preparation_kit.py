@@ -1,6 +1,6 @@
-## ※前処理：データセットの整形、データベースの構築
-## -> data_preparation1.ipynb内で直接実装および実行している
-## ※時間を見つけて、これらもこっちに移行させた方が良いかも
+## ※前処理：元のデータセットの整形とラベルの選択、データベースの構築
+## -> data_preparation.ipynb内で直接実装および実行している
+## ※時間を見つけて、これらもこっちに移行させた方が良いかも...？
 
 import nltk
 import unicodedata
@@ -34,7 +34,7 @@ def load_json_as_dict(json_name):
     JSON形式の文字列を辞書として読み込む
     参考サイト：https://note.nkmk.me/python-json-load-dump/
     """
-    with open("./" + json_name, "r") as json_file:
+    with open(json_name, "r") as json_file:
         return json.load(json_file, object_pairs_hook = OrderedDict)
 
 def save_dict_as_json(dict_name, json_name, indent = 4):
@@ -111,18 +111,22 @@ def judge_necessity_word_stem(node_surface, node_feature):
     not_suffix = node_feature.split(",")[1] != "接尾"
     return surface_has_content and not_in_stopwords and is_meaningful_word and not_suffix
 
-def get_all_usertalks_from_corpus():
+def get_all_usertalk_data_from_corpus():
     """
-    コーパスからユーザ発話のみを取得する
+    コーパスから、ユーザ発話のデータを全て取得する
+    talker text, talk_content text, emotion text, acceptance text
     """
     corpus = sqlite3.connect(constructed_corpus_path)
     cur = corpus.cursor()
     scenes = ["cleaning", "exercise", "game", "lunch", "sleep"]
     dialogue_idx = [str(i) for i in range(200)]
-    all_usertalk = []
+    all_usertalk_data = [] # コーパス内の全てのユーザ発話のデータ
+    all_talk_data = [] # コーパス内の全ての発話（ユーザとシステム両方）のデータ
+    append_ok_idx_list = []
+    append_flag = True
     
     t1 = time.time()
-    # コーパス全体からユーザ発話のみを取得
+    count = 0
     for scene in scenes:
         for idx in dialogue_idx:
             dialogue_name = scene + idx
@@ -132,10 +136,43 @@ def get_all_usertalks_from_corpus():
             # 存在するテーブル名の長さよりも長ければ攻撃だと判定できる（len(table) > (存在するテーブル名): 攻撃だと判定）
             # by.師匠
             cur.execute("select * from {}".format(dialogue_name))
-            all_usertalk.append([talk[1] for i, talk in enumerate(cur.fetchall()) if i % 2 == 1])
+            a_dialogue = cur.fetchall() # fetchall() -> 1対話に含まれるユーザ発話のデータを取得している
+            for i, talk_data in enumerate(a_dialogue):
+                if talk_data[0] == "user" : # ユーザの発話データを見ている場合
+                    if talk_data[3] != "NONE":
+                        all_usertalk_data.append(talk_data) # ユーザ発話のデータをappend
+                        append_ok_idx_list.append(count)
+                count += 1
+            """
+            for i, talk_data in enumerate(a_dialogue):
+                count += 1
+                if talk_data[0] == "user": # ユーザの発話データを見ている場合
+                    if talk_data[3] != "NONE":
+                        all_usertalk_data.append(talk_data) # ユーザ発話のデータをappend
+                    else:
+                        all_talk_data.pop()
+                        append_flag = False
+                if append_flag:
+                    if i + 1 < len(a_dialogue):
+                        if a_dialogue[i + 1][0] == "system" and talk_data[0] == "system":
+                            pass
+                        else:
+                            append_ok_idx_list.append(count)
+                            all_talk_data.append(talk_data)
+                    elif talk_data[0] == "user":
+                        append_ok_idx_list.append(count)
+                        all_talk_data.append(talk_data)
+                else:
+                    append_flag = True
+                    if i + 2 < len(a_dialogue):
+                        if a_dialogue[i + 2][0] == "system":
+                            append_flag = False
+            """
+    
     t2 = time.time()
-    print("Finished getting all user talks from dialogue_corpus.db: about {} seconds.".format(t2 - t1))
-    return all_usertalk
+    print("Finished getting all user talks from {}: about {} seconds.".format(constructed_corpus_path, t2 - t1))
+    print("in def_usertalks len(append_ok_idx_list) = {}".format(len(append_ok_idx_list)))
+    return all_usertalk_data[:], append_ok_idx_list # 下記SVRの訓練のy, Xの特徴ベクトルのキーに該当する
 
 def make_and_save_tables():
     """
