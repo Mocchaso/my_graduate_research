@@ -1,35 +1,45 @@
 ## 全てmy_feature_vector_creator.ipynbで使用。
 
-from my_data_preparation_kit import convert_dict_to_json, load_json_as_dict, save_dict_as_json, get_all_usertalks_from_corpus, normalize
+from my_data_preparation_kit import convert_dict_to_json, load_json_as_dict, save_dict_as_json, normalize, get_all_usertalk_data_from_corpus
 import sqlite3
 import MeCab
 import time
+import numpy as np
+import struct
 
 constructed_corpus_path = "dialogue_corpus.db"
 pn_ja_dict_path = "../pn_ja.dic"
+svr_bow_bin_path = "svr_bow_vec.bin" 
 
-def get_analyzed_all_usertalks():
+def get_all_words_in_corpus():
     """
-    分かち書きしたユーザ発話を全て取得する
+    コーパス内の発話（ユーザ発話とシステム発話両方）に含まれる単語を全て取得する
     """
-    all_usertalk = get_all_usertalks_from_corpus()
+    corpus = sqlite3.connect(constructed_corpus_path)
+    cur = corpus.cursor()
+    scenes = ["cleaning", "exercise", "game", "lunch", "sleep"]
+    dialogue_idx = [str(i) for i in range(200)]
     m = MeCab.Tagger("-Owakati")
+    all_words_list = []
     
-    result = []
     t1 = time.time()
-    for i, usertalks in enumerate(all_usertalk): # usertalks：1対話それぞれにおけるユーザ発話を格納しているリスト
-        for usertalk in usertalks:
-            usertalk = normalize(usertalk) # 発話の正規化
-            wakati = m.parse(usertalk) # 分かち書きモードで形態素解析
-            result.append(wakati)
+    for scene in scenes:
+        for idx in dialogue_idx:
+            dialogue_name = scene + idx
+            # 一般的なインジェクション攻撃はテーブル名を変える攻撃が無いから、?で置き換えるやつが実装されていない（かも）
+            # テーブル名を変える攻撃の場合は文字列の長さで防げるので、formatで大丈夫
+            # "select * from {}".format(table)にすると、tableをA where '1'='1'にすれば攻撃できるけど
+            # 存在するテーブル名の長さよりも長ければ攻撃だと判定できる（len(table) > (存在するテーブル名): 攻撃だと判定）
+            # by.師匠
+            cur.execute("select * from {}".format(dialogue_name))
+            a_dialogue = cur.fetchall() # fetchall() -> 1対話に含まれる全ての発話データを取得している
+            for i, talk_data in enumerate(a_dialogue):
+                talk_content = normalize(talk_data[1])
+                words_in_talk_content = m.parse(talk_content).split()
+                all_words_list.extend(words_in_talk_content) # コーパス内の全発話内の単語を全て記録するリストに連結する
     t2 = time.time()
-    
-    print("Finished getting all analyzed user talks: about {} seconds.".format(t2 - t1))
-    # イメージ
-    # ['私 は ラーメン が 好き です 。',
-    #  '私 は 餃子 が 好き です 。',
-    #  '私 は ラーメン が 嫌い です 。']
-    return result
+    print("Finished getting all words from {}: about {} seconds.".format(constructed_corpus_path, t2 - t1))
+    return all_words_list[:]
 
 def get_key_from_values(dic, val):
     """
@@ -41,10 +51,9 @@ def get_key_from_values(dic, val):
         return keys[0]
     return None
 
-def make_svr_learning_feature(w_table, s_table, bow_txt_path):
+def make_svr_learning_feature(w_table, s_table):
     """
     ユーザが入力した発話から特徴ベクトルを作成する
-    ※morphemes -> 分かち書きされた全てのユーザ発話
     
     手順
     1. MeCabを用いて形態素解析 -> ユーザ発話から言語特徴量を抽出する
@@ -55,7 +64,7 @@ def make_svr_learning_feature(w_table, s_table, bow_txt_path):
     2. 単語極性辞書 -> 発話文に含まれる単語に付与された極性スコアの平均値を算出する
        この2の値を上記の単語特徴ベクトルに付加 -> 1発話の特徴ベクトルとする
     
-    bag of wordsの最終的な構造：(row, col) = (発話, 単語および各単語の同義語 + 各発話の極性スコアの平均値)
+    bag of wordsの最終的な構造：(row, col) = (ユーザ発話, コーパスに含まれる全ての単語 + 各発話の極性スコアの平均値)
     """
     # 単語極性辞書の読み込み
     pn_table = {}
@@ -65,60 +74,69 @@ def make_svr_learning_feature(w_table, s_table, bow_txt_path):
             pn_table[line[0]] = float(line[3])
     print("Finished loading pn_ja.dic.")
     
-    # コーパス内の全単語に通し番号を割り当てる（0～len(w_table)）
-    word2id = {} # {単語: ID}
-    for word in w_table.keys(): # word_tableに登録してある各単語
-        if word not in word2id.keys():
-            word2id[word] = len(word2id)
+    # コーパス内の全てのユーザ発話のデータ：[ talk_data -> tuple, ... ]
+    all_usertalk_data = get_all_usertalk_data_from_corpus()
+    # コーパス内の全単語
+    all_words_in_corpus = get_all_words_in_corpus()
+    # コーパス内の全単語の重複無しバージョン（順序を保持している）
+    # 参考サイト：https://note.nkmk.me/python-list-unique-duplicate/
+    all_words_in_corpus_uniq = sorted(set(all_words_in_corpus), key = all_words_in_corpus.index)
+    print("Finished making all_words-list which removed duplication. (order of the list is kept)")
+    
+    # コーパス内の全単語とその同義語を、対応する列にまとめたリスト
+    # 対応する単語IDが無い or 同義語が無い場合は、その単語自体のみを含んだリストが格納される
+    t0 = time.time()
+    columns = []
+    for word in all_words_in_corpus_uniq:
+        column = [word]
+        wordids = []
+        if word in w_table.keys(): # wordがユーザ発話に含まれる単語ならば
+            wordids = w_table[word]
+        if wordids != []: # wordに対応する単語IDがあれば
+            for wordid in wordids:
+                # wordidに対応する同義語をcolumnに追加
+                synonyms = s_table[str(wordid)]
+                column.extend(synonyms)
+        columns.append(column)
+    t01 = time.time()
+    print("Finished making a list about words in corpus and their synonyms: about {} seconds.".format(t01 - t0))
     
     # bag of wordsを作る
-    bow_set = []
-    morphemes = get_analyzed_all_usertalks()
     t1 = time.time()
-    for wakati_usertalk in morphemes:
-        bow = [0] * len(word2id.keys()) # 各発話の全単語分の次元数
+    bow_set = []
+    m = MeCab.Tagger("-Owakati")
+    for usertalk_data in all_usertalk_data:
+        bow = [0] * len(columns) # 1発話の特徴ベクトル
         word_pn_scores = 0 # 1発話当たりの極性スコアの記録
-        for word in wakati_usertalk.split():
-            try:
-                if word in pn_table.keys(): # 1発話当たりの極性スコアを加算
-                    word_pn_scores += pn_table[word]
-                
-                if word in word2id.keys(): # 発話内の単語wordが、word_tableに登録されていたら
-                    bow[word2id[word]] = 1
-                    continue
-                
-                for synonyms in s_table.value():
-                    if word in synonyms: # 発話内の単語wordが、synonym_tableに登録されていたら
-                        # wordと同義語の関係を持つ単語のIDを、s_tableで逆算して探す
-                        # （wordがsynonymsに含まれている場合に限定しているが、辞書のキーは複数の値を持てないためsynonyms_idは1個のみである）
-                        synonyms_id = get_key_from_value(s_table, synonyms)
-                        
-                        # 該当する単語IDの単語そのものを、w_tableから探す
-                        # （1つの単語は複数のsynsetに属する = synonyms_idは複数のw_idsに属する可能性があるので、len(words) >= 1である）
-                        words = []
-                        for w_ids in w_table.value():
-                            if int(synonyms_id) in w_ids: # word_tableとsynonym_tableの単語IDの型を合わせるため、intで変換
-                                words.append(get_key_from_value(w_table, w_ids))
-                        
-                        # bag of wordsを更新する
-                        for w in words:
-                            bow[word2id[w]] = 1
-            except: # 発話内の単語wordが、w_tableに登録されていない場合
-                pass
+        usertalk_content = normalize(usertalk_data[1]) # ユーザ発話の内容
+        words_in_usertalk_content = m.parse(usertalk_content).split() # ユーザ発話に含まれる単語のリスト
+        for word in words_in_usertalk_content:
+            # word：ユーザ発話に含まれる単語
+            # columns：コーパス内の全単語とその同義語を、対応する列にまとめたリスト
+            for col_i, column in enumerate(columns):
+                if word in column: # wordが、対応する列にまとめておいた単語と同義語のリストに含まれていたら
+                    bow[col_i] = 1
+            
+            if word in pn_table.keys(): # 1つのユーザ発話内の単語の極性スコアを加算
+                word_pn_scores += pn_table[word]
         else:
             # 1発話の単語について全て調べ終わったら、発話文の各単語の極性スコアの平均値を算出する
             # 小数点以下切り捨て防止のため分子にfloat()、0除算防止のため分母に+1
-            word_pn_ave = float(word_pn_scores) / (len(wakati_usertalk.split()) + 1)
+            word_pn_ave = float(word_pn_scores) / (len(words_in_usertalk_content) + 1)
             bow.append(word_pn_ave)
         bow_set.append(bow)
-        
     t2 = time.time()
     print("Finished making bag of words vector: about {} seconds.".format(t2 - t1))
+    print("shape first vector in bag of words vector: {}".format(np.array(bow_set[0]).shape))
+    print("shape last vector in bag of words vector: {}".format(np.array(bow_set[-1]).shape))
+    print("shape of bag of words vector: {}".format(np.array(bow_set).shape))
     
-    # 作成したbag of wordsをtxtファイルに保存する
-    # eval(file.read())で再利用できる
+    # 作成したbag of wordsをバイナリデータとして保存する
     t3 = time.time()
-    with open(bow_txt_path, mode = "w") as file:
-        file.write(str(bow_set))
+    str_bow_set = str(bow_set)
+    print("len(str_bow_set) = {}".format(len(str_bow_set)))
+    bow_data = struct.pack(str(len(str_bow_set)) + "s", str_bow_set.encode("utf-8")) # バイナリに変換する
+    with open(svr_bow_bin_path, "wb") as file:
+        file.write(bow_data)
     t4 = time.time()
     print("Finished saving bag of words vector: about {} seconds.".format(t4 - t3))

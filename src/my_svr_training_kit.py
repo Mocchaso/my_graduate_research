@@ -1,75 +1,16 @@
-import numpy as np
+import scipy.sparse as sp
 from sklearn.svm import SVR
 from sklearn.externals import joblib
 import matplotlib.pyplot as plt
 import sqlite3
 import time
+from my_data_preparation_kit import get_all_usertalk_data_from_corpus
+from my_feature_vector_creator_kit import get_all_words_in_corpus
+import struct
 
 constructed_corpus_path = "dialogue_corpus.db"
+svr_bow_bin_path = "svr_bow_vec.bin" # バイナリデータ化したbag of wordsの保存先のパス（ファイル名）
 trained_svr_path = "user_acceptance_estimation.pkl"
-
-def get_all_usertalk_data_from_corpus():
-    """
-    コーパスから、ユーザ発話のデータを全て取得する
-    talker text, talk_content text, emotion text, acceptance text
-    """
-    corpus = sqlite3.connect(constructed_corpus_path)
-    cur = corpus.cursor()
-    scenes = ["cleaning", "exercise", "game", "lunch", "sleep"]
-    dialogue_idx = [str(i) for i in range(200)]
-    all_usertalk_data = [] # コーパス内の全てのユーザ発話のデータ
-    all_talk_data = [] # コーパス内の全ての発話（ユーザとシステム両方）のデータ
-    append_ok_idx_list = []
-    append_flag = True
-    
-    t1 = time.time()
-    count = 0
-    for scene in scenes:
-        for idx in dialogue_idx:
-            dialogue_name = scene + idx
-            # 一般的なインジェクション攻撃はテーブル名を変える攻撃が無いから、?で置き換えるやつが実装されていない（かも）
-            # テーブル名を変える攻撃の場合は文字列の長さで防げるので、formatで大丈夫
-            # "select * from {}".format(table)にすると、tableをA where '1'='1'にすれば攻撃できるけど
-            # 存在するテーブル名の長さよりも長ければ攻撃だと判定できる（len(table) > (存在するテーブル名): 攻撃だと判定）
-            # by.師匠
-            cur.execute("select * from {}".format(dialogue_name))
-            a_dialogue = cur.fetchall() # fetchall() -> 1対話に含まれるユーザ発話のデータを取得している
-            for i, talk_data in enumerate(a_dialogue):
-                if talk_data[0] == "user" : # ユーザの発話データを見ている場合
-                    if talk_data[3] != "NONE":
-                        all_usertalk_data.append(talk_data) # ユーザ発話のデータをappend
-                        append_ok_idx_list.append(count)
-                count += 1
-            """
-            for i, talk_data in enumerate(a_dialogue):
-                count += 1
-                if talk_data[0] == "user": # ユーザの発話データを見ている場合
-                    if talk_data[3] != "NONE":
-                        all_usertalk_data.append(talk_data) # ユーザ発話のデータをappend
-                    else:
-                        all_talk_data.pop()
-                        append_flag = False
-                if append_flag:
-                    if i + 1 < len(a_dialogue):
-                        if a_dialogue[i + 1][0] == "system" and talk_data[0] == "system":
-                            pass
-                        else:
-                            append_ok_idx_list.append(count)
-                            all_talk_data.append(talk_data)
-                    elif talk_data[0] == "user":
-                        append_ok_idx_list.append(count)
-                        all_talk_data.append(talk_data)
-                else:
-                    append_flag = True
-                    if i + 2 < len(a_dialogue):
-                        if a_dialogue[i + 2][0] == "system":
-                            append_flag = False
-            """
-    
-    t2 = time.time()
-    print("Finished getting all user talks from {}: about {} seconds.".format(constructed_corpus_path, t2 - t1))
-    print("in def_usertalks len(append_ok_idx_list) = {}".format(len(append_ok_idx_list)))
-    return all_usertalk_data[:], append_ok_idx_list # 下記SVRの訓練のy, Xの特徴ベクトルのキーに該当する
 
 def train_svr():
     """
@@ -83,34 +24,31 @@ def train_svr():
     https://web-salad.hateblo.jp/entry/2014/11/09/090000
     """
     t1 = time.time()
-    tmp_X = [] # "NONE"が含まれているbag of wordsの特徴ベクトル（2次元のリスト）
-    all_usertalk_data, append_ok_idx_list = get_all_usertalk_data_from_corpus()
-    with open("./svr_bow_vec.txt") as file:
-        tmp_X = eval(file.read())[:]
-    t2 = time.time()
-    print("Finished loading input bag of words vector: about {} seconds.".format(t2 - t1))
+    all_usertalk_data = get_all_usertalk_data_from_corpus()
+    print("len(all_usertalk_data) = {}".format(len(all_usertalk_data)))
     
-    t1_2 = time.time()
-    X = []
-    print("len(tmp_X) = {}".format(len(tmp_X)))
-    for i in append_ok_idx_list:
-        X.append(tmp_X[i])
-    t2_2 = time.time()
-    print("len(X[0]) = {}".format(len(X[0])))
-    print("len(X) = {}".format(len(X)))
-    print("Finished making input bag of words vector except NONE label: about {} seconds.".format(t2_2 - t1_2))
+    # バイナリデータとして書き込んだbag of wordsを読み込んで復元する
+    X = None # bag of wordsの特徴ベクトル（2次元のリスト）
+    with open(svr_bow_bin_path, "rb") as file:
+        read_bow_set = file.read()
+        bow_set_bytes_tuple = struct.unpack("s" * len(read_bow_set), read_bow_set) # 読み込んだバイナリデータをbytesとして復元する
+        bow_set_unicode = list(map(lambda x: x.decode(), bow_set_bytes_tuple)) # bytesからunicode文字列に変換する
+        # リスト内の文字を結合 -> 二次元リストに変換 -> 疎行列として扱う
+        # (row, col) = (10983, 6548) -> (全ユーザ発話の合計, コーパスに含まれる全単語数 + 1)
+        X = sp.lil_matrix(eval("".join(bow_set_unicode))[:])
+    t2 = time.time()
+    print("Finished loading input vector, bag of words: about {} seconds.".format(t2 - t1))
     
     t3 = time.time()
     y = [] # SVRの出力：ユーザの受諾度合いの正解ラベル [acceptance]
-    print("in def_svr ... len(all_usertalk_data) = {}".format(len(all_usertalk_data)))
     for usertalk_data in all_usertalk_data:
-        an_acceptance_label = usertalk_data[3]
-        print("an_acceptance_label = {}".format(an_acceptance_label))
-        y.append(int(an_acceptance_label))
+        if usertalk_data[3] != "NONE": # NONEとアノテートされている受諾度合いラベルは、学習データから除く
+            an_acceptance_label = int(usertalk_data[3])
+            y.append(an_acceptance_label)
     t4 = time.time()
-    print("Finished making output vector: about {} seconds.".format(t4 - t3))
+    print("Finished making output vector, user acceptance labels: about {} seconds.".format(t4 - t3))
     
-    print("yのサイズ：{}".format(len(y)))
+    print("len(y) = {}".format(len(y)))
     
     # モデルの学習
     t5 = time.time()

@@ -43,8 +43,8 @@ def save_dict_as_json(dict_name, json_name, indent = 4):
     word_tableとsynonym_tableをJSONファイルとして保存する
     このノートブックをシャットダウンしたら、JSONファイルの内容を閲覧できるようになる(それまでは何故か内容が更新されていない)
     """
-    fw = open(json_name, "w")
-    json.dump(dict_name, fw, indent = indent)
+    with open(json_name, "w") as json_file:
+        json.dump(dict_name, json_file, indent = indent)
 
 ## word_tableとsynonym_tableの作成およびJSONファイルへの保存
 ## 前処理：語の正規化は、ここで利用している
@@ -113,20 +113,16 @@ def judge_necessity_word_stem(node_surface, node_feature):
 
 def get_all_usertalk_data_from_corpus():
     """
-    コーパスから、ユーザ発話のデータを全て取得する
-    talker text, talk_content text, emotion text, acceptance text
+    コーパス内のユーザ発話のデータを全て取得する
+    -> tuple: (talker text, talk_content text, emotion text, acceptance text)
     """
     corpus = sqlite3.connect(constructed_corpus_path)
     cur = corpus.cursor()
     scenes = ["cleaning", "exercise", "game", "lunch", "sleep"]
     dialogue_idx = [str(i) for i in range(200)]
     all_usertalk_data = [] # コーパス内の全てのユーザ発話のデータ
-    all_talk_data = [] # コーパス内の全ての発話（ユーザとシステム両方）のデータ
-    append_ok_idx_list = []
-    append_flag = True
     
     t1 = time.time()
-    count = 0
     for scene in scenes:
         for idx in dialogue_idx:
             dialogue_name = scene + idx
@@ -136,52 +132,23 @@ def get_all_usertalk_data_from_corpus():
             # 存在するテーブル名の長さよりも長ければ攻撃だと判定できる（len(table) > (存在するテーブル名): 攻撃だと判定）
             # by.師匠
             cur.execute("select * from {}".format(dialogue_name))
-            a_dialogue = cur.fetchall() # fetchall() -> 1対話に含まれるユーザ発話のデータを取得している
+            a_dialogue = cur.fetchall() # fetchall() -> 1対話に含まれる全ての発話データを取得している
             for i, talk_data in enumerate(a_dialogue):
-                if talk_data[0] == "user" : # ユーザの発話データを見ている場合
-                    if talk_data[3] != "NONE":
-                        all_usertalk_data.append(talk_data) # ユーザ発話のデータをappend
-                        append_ok_idx_list.append(count)
-                count += 1
-            """
-            for i, talk_data in enumerate(a_dialogue):
-                count += 1
-                if talk_data[0] == "user": # ユーザの発話データを見ている場合
-                    if talk_data[3] != "NONE":
-                        all_usertalk_data.append(talk_data) # ユーザ発話のデータをappend
-                    else:
-                        all_talk_data.pop()
-                        append_flag = False
-                if append_flag:
-                    if i + 1 < len(a_dialogue):
-                        if a_dialogue[i + 1][0] == "system" and talk_data[0] == "system":
-                            pass
-                        else:
-                            append_ok_idx_list.append(count)
-                            all_talk_data.append(talk_data)
-                    elif talk_data[0] == "user":
-                        append_ok_idx_list.append(count)
-                        all_talk_data.append(talk_data)
-                else:
-                    append_flag = True
-                    if i + 2 < len(a_dialogue):
-                        if a_dialogue[i + 2][0] == "system":
-                            append_flag = False
-            """
-    
+                if talk_data[0] == "user": # ユーザの発話データを見ている
+                    all_usertalk_data.append(talk_data) # ユーザ発話のデータをappend
     t2 = time.time()
     print("Finished getting all user talks from {}: about {} seconds.".format(constructed_corpus_path, t2 - t1))
-    print("in def_usertalks len(append_ok_idx_list) = {}".format(len(append_ok_idx_list)))
-    return all_usertalk_data[:], append_ok_idx_list # 下記SVRの訓練のy, Xの特徴ベクトルのキーに該当する
+    return all_usertalk_data[:]
 
-def make_and_save_tables():
+def record_word_and_synonym():
     """
     2つの辞書を作ってJSONファイルとして保存する
     データの形式
     word_table ... {word -> str: wordid -> list}
-    synonym_table ... {wordid[i] -> init: synonym -> list}
+    synonym_table ... {wordid[i] -> int: synonym -> list}
     """
-    all_usertalk = get_all_usertalks_from_corpus()
+    # コーパス内の全てのユーザ発話のデータ：[ talk_data -> tuple, ... ]
+    all_usertalk_data = get_all_usertalk_data_from_corpus()
     wn_db = sqlite3.connect(wordnet_path)
     wn_c = wn_db.cursor()
     m = MeCab.Tagger("-Ochasen")
@@ -189,58 +156,54 @@ def make_and_save_tables():
     synonym_table = {}
     
     t3 = time.time()
-    for i, usertalks in enumerate(all_usertalk): # usertalks：1対話それぞれにおけるユーザ発話を格納しているリスト
-        for usertalk in usertalks:
-            ## 単語IDの取得
-            # 発話の正規化
-            usertalk = normalize(usertalk)
-            # MeCabによる形態素解析で、発話に含まれる単語を抽出する
-            # node.surface -> 表層形(区切った単語自体)
-            # node.feature -> 表層形の詳細(品詞,品詞細分類1,品詞細分類2,品詞細分類3,活用型,活用形,原形,読み,発音)
-            node = m.parseToNode(usertalk)
-            while node:
-                if judge_necessity_word_stem(node.surface, node.feature):
-                    # 各単語の語幹を取り出す
-                    orig_form = node.feature.split(",")[6]
-                    # 抽出した単語に対応する単語IDを取得する
-                    wn_c.execute("select * from word where lemma = ?", (orig_form,))
-                    key = node.surface
-                    value = [i[0] for i in wn_c.fetchall()] # i -> [(単語ID, jpnかeng, 単語, None, 品詞), (...)] -> 単語IDのみ取得
-                    word_table[key] = value
-                node = node.next
-
-            ## 各単語の同義語の取得
-            for word, wordids in word_table.items():
-                if wordids != []:
-                    for wordid in wordids:
-                        # wordidに対応する単語が属するsynsetをsenseテーブルから取得する
-                        # synset -> 同義語をまとめてある単語の集まり
-                        # 注：1つの単語は複数のsynsetに属する
-                        wn_c.execute("select * from sense where wordid = ?", (wordid,))
-                        synsets = [s[0] for s in wn_c.fetchall()] # s -> [(synset, wordid, lang, rank, lexid, freq, src), (...)] -> synsetのみを取得
-                        
-                        # 1つのwordidが持つ同義語全てを格納するリスト
-                        synonyms_of_wordid = []
-                        for synset in synsets:
-                            # synset内の単語をWordNetのwordテーブルから探す
-                            wn_c.execute("select lemma from sense, word where synset = ? and word.lang = \"jpn\" and sense.wordid = word.wordid", (synset,))
-                            for s in wn_c.fetchall(): # s -> [("同義語",), ("同義語",), ...] -> 同義語の文字列のみ取得
-                                if s[0] not in synonyms_of_wordid:
-                                    synonyms_of_wordid.append(s[0])
-                        key = wordid
-                        value = synonyms_of_wordid
-                        synonym_table[key] = value
-        print("Finished registering {} usertalks.".format(i + 1))
+    for usertalk_data in all_usertalk_data:
+        ## 単語IDの取得
+        # 発話の正規化
+        talk_content = normalize(usertalk_data[1])
+        # MeCabによる形態素解析で、コーパス内のユーザ発話に含まれる単語を抽出する
+        # node.surface -> 表層形(区切った単語自体)
+        # node.feature -> 表層形の詳細(品詞,品詞細分類1,品詞細分類2,品詞細分類3,活用型,活用形,原形,読み,発音)
+        node = m.parseToNode(talk_content)
+        while node:
+            if judge_necessity_word_stem(node.surface, node.feature):
+                # ユーザ発話の特徴に影響する単語なら、その語幹を取り出す
+                # 影響しない単語（は、が、を、に、のような助詞等）なら無視する
+                orig_form = node.feature.split(",")[6]
+                # 抽出した単語の語幹に対応する単語IDを取得する
+                wn_c.execute("select * from word where lemma = ?", (orig_form,))
+                key = node.surface
+                value = [i[0] for i in wn_c.fetchall()] # i -> [(単語ID, jpnかeng, 単語, None, 品詞), (...)] -> 単語IDのみ取得
+                word_table[key] = value
+            node = node.next
+        
+        ## 各単語の同義語の取得
+        for word, wordids in word_table.items():
+            if wordids != []:
+                for wordid in wordids:
+                    # wordidに対応する単語が属するsynsetをsenseテーブルから取得する
+                    # synset -> 同義語をまとめてある単語の集まり
+                    # 注：1つの単語は複数のsynsetに属する
+                    wn_c.execute("select * from sense where wordid = ?", (wordid,))
+                    synsets = [s[0] for s in wn_c.fetchall()] # s -> [(synset, wordid, lang, rank, lexid, freq, src), (...)] -> synsetのみを取得
+                    
+                    synonyms_of_wordid = [] # 1つのwordidが持つ同義語を全て格納するリスト
+                    for synset in synsets:
+                        # synset内の単語をWordNetのwordテーブルから探す
+                        wn_c.execute("select lemma from sense, word where synset = ? and word.lang = \"jpn\" and sense.wordid = word.wordid", (synset,))
+                        for s in wn_c.fetchall(): # s -> [("同義語",), ("同義語",), ...] -> 同義語の文字列のみ取得
+                            if s[0] not in synonyms_of_wordid:
+                                synonyms_of_wordid.append(s[0])
+                    key = wordid
+                    value = synonyms_of_wordid
+                    synonym_table[key] = value
     t4 = time.time()
-    print("Finished registering all wordids to word_table.")
-    print("Finished registering all synonyms to synonym_table.")
+    print("Finished making word_table, synonym_table: about {} seconds.".format(t4 - t3))
     
     t5 = time.time()
     save_dict_as_json(word_table, word_table_json_name, 4)
-    print("Finished registering a dict: word_table with file: {}".format(word_table_json_name))
+    print("Finished registering word_table as a dict: {}".format(word_table_json_name))
     save_dict_as_json(synonym_table, synonym_table_json_name, 4)
-    print("Finished registering a dict: synonym_table with file: {}".format(synonym_table_json_name))
+    print("Finished registering synonym_table as a dict: {}".format(synonym_table_json_name))
     t6 = time.time()
     
-    print("Finished making word_table, synonym_table took about {} seconds.".format(t4 - t3))
-    print("Finished saving word_table, synonym_table took about {} seconds.".format(t6 - t5))
+    print("Finished saving word_table, synonym_table: about {} seconds.".format(t6 - t5))
