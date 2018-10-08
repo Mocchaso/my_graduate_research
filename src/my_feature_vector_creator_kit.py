@@ -4,12 +4,11 @@ from my_data_preparation_kit import convert_dict_to_json, load_json_as_dict, sav
 import sqlite3
 import MeCab
 import time
-import numpy as np
-import struct
+import scipy.sparse as sci_sp
 
 constructed_corpus_path = "dialogue_corpus.db"
 pn_ja_dict_path = "../pn_ja.dic"
-svr_bow_bin_path = "svr_bow_vec.bin" 
+svr_bow_path = "svr_bow_vec.npz"
 
 def get_all_words_in_corpus():
     """
@@ -106,37 +105,42 @@ def make_svr_learning_feature(w_table, s_table):
     bow_set = []
     m = MeCab.Tagger("-Owakati")
     for usertalk_data in all_usertalk_data:
-        bow = [0] * len(columns) # 1発話の特徴ベクトル
-        word_pn_scores = 0 # 1発話当たりの極性スコアの記録
-        usertalk_content = normalize(usertalk_data[1]) # ユーザ発話の内容
-        words_in_usertalk_content = m.parse(usertalk_content).split() # ユーザ発話に含まれる単語のリスト
-        for word in words_in_usertalk_content:
-            # word：ユーザ発話に含まれる単語
-            # columns：コーパス内の全単語とその同義語を、対応する列にまとめたリスト
-            for col_i, column in enumerate(columns):
-                if word in column: # wordが、対応する列にまとめておいた単語と同義語のリストに含まれていたら
-                    bow[col_i] = 1
-            
-            if word in pn_table.keys(): # 1つのユーザ発話内の単語の極性スコアを加算
-                word_pn_scores += pn_table[word]
-        else:
-            # 1発話の単語について全て調べ終わったら、発話文の各単語の極性スコアの平均値を算出する
-            # 小数点以下切り捨て防止のため分子にfloat()、0除算防止のため分母に+1
-            word_pn_ave = float(word_pn_scores) / (len(words_in_usertalk_content) + 1)
-            bow.append(word_pn_ave)
-        bow_set.append(bow)
+        if usertalk_data[3] != "NONE": # NONEとアノテートされている受諾度合いラベルは、学習データから除く
+            bow = [0] * len(columns) # 1発話の特徴ベクトル
+            word_pn_scores = 0 # 1発話当たりの極性スコアの記録
+            usertalk_content = normalize(usertalk_data[1]) # ユーザ発話の内容
+            words_in_usertalk_content = m.parse(usertalk_content).split() # ユーザ発話に含まれる単語のリスト
+            for word in words_in_usertalk_content:
+                # word：ユーザ発話に含まれる単語
+                # columns：コーパス内の全単語とその同義語を、対応する列にまとめたリスト
+                for col_i, column in enumerate(columns):
+                    if word in column: # wordが、対応する列にまとめておいた単語と同義語のリストに含まれていたら
+                        bow[col_i] = 1
+
+                if word in pn_table.keys(): # 1つのユーザ発話内の単語の極性スコアを加算
+                    word_pn_scores += pn_table[word]
+            else:
+                # 1発話の単語について全て調べ終わったら、発話文の各単語の極性スコアの平均値を算出する
+                # 小数点以下切り捨て防止のため分子にfloat()、0除算防止のため分母に+1
+                word_pn_ave = float(word_pn_scores) / (len(words_in_usertalk_content) + 1)
+                bow.append(word_pn_ave)
+            bow_set.append(bow)
     t2 = time.time()
     print("Finished making bag of words vector: about {} seconds.".format(t2 - t1))
-    print("shape first vector in bag of words vector: {}".format(np.array(bow_set[0]).shape))
-    print("shape last vector in bag of words vector: {}".format(np.array(bow_set[-1]).shape))
-    print("shape of bag of words vector: {}".format(np.array(bow_set).shape))
     
-    # 作成したbag of wordsをバイナリデータとして保存する
+    # 作成したbag of wordsを疎行列に変換する
+    # 参考サイト：
+    # https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.save_npz.html#scipy.sparse.save_npz
+    # http://hamukazu.com/2014/09/26/scipy-sparse-basics/
+    # https://ohke.hateblo.jp/entry/2018/01/07/230000
     t3 = time.time()
-    str_bow_set = str(bow_set)
-    print("len(str_bow_set) = {}".format(len(str_bow_set)))
-    bow_data = struct.pack(str(len(str_bow_set)) + "s", str_bow_set.encode("utf-8")) # バイナリに変換する
-    with open(svr_bow_bin_path, "wb") as file:
-        file.write(bow_data)
+    bow_set = sci_sp.lil_matrix(bow_set)
+    bow_set = bow_set.tocsr() # csr_matrixに変換する -> ファイルに保存できる＆行単位に高速にアクセスできる
     t4 = time.time()
-    print("Finished saving bag of words vector: about {} seconds.".format(t4 - t3))
+    print("Finished converting bag of words vector to sparse matrix: about {} seconds.".format(t4 - t3))
+    print("shape of bag of words vector: {}".format(bow_set.shape))
+    # bag of wordsをnpzファイルに保存する
+    t5 = time.time()
+    sci_sp.save_npz(svr_bow_path, bow_set)
+    t6 = time.time()
+    print("Finished saving bag of words vector at {}: about {} seconds.".format(svr_bow_path, t6 - t5))
